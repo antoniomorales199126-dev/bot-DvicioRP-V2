@@ -37,12 +37,14 @@ module.exports = {
     if (subcommand === 'ver') {
       const active = getActiveGiveaways();
       if (!active.length) {
-        await interaction.reply({ content: 'No hay sorteos activos.', ephemeral: true });
+        await interaction.reply({ content: 'No hay sorteos activos.', flags: 64 });
         return;
       }
 
-      const lines = active.map(g => `• ID: \`${g.id}\` — Premio: **${g.prize}** — Ganadores: **${g.winnersCount}**`);
-      await interaction.reply({ content: lines.join('\n'), ephemeral: true });
+      const lines = active.map(g => (
+        `• ID: \`${g.id}\` — Premio: **${g.prize}** — Ganadores: **${g.winnersCount}** — Participantes: **${g.participants.length}**`
+      ));
+      await interaction.reply({ content: lines.join('\n'), flags: 64 });
       return;
     }
 
@@ -50,16 +52,21 @@ module.exports = {
       const id = interaction.options.getString('id', true);
       const giveaway = getGiveawayById(id);
       if (!giveaway) {
-        await interaction.reply({ content: 'No existe un sorteo con ese ID.', ephemeral: true });
+        await interaction.reply({ content: 'No existe un sorteo con ese ID.', flags: 64 });
         return;
       }
       if (giveaway.ended) {
-        await interaction.reply({ content: 'Ese sorteo ya está finalizado.', ephemeral: true });
+        await interaction.reply({ content: 'Ese sorteo ya está finalizado.', flags: 64 });
         return;
       }
 
-      await endGiveaway(client, id);
-      await interaction.reply({ content: `✅ Sorteo \`${id}\` finalizado.`, ephemeral: true });
+      const result = await endGiveaway(client, id);
+      if (!result) {
+        await interaction.reply({ content: '❌ No se pudo finalizar el sorteo.', flags: 64 });
+        return;
+      }
+
+      await interaction.reply({ content: `✅ Sorteo \`${id}\` finalizado.`, flags: 64 });
       return;
     }
 
@@ -67,18 +74,22 @@ module.exports = {
       const id = interaction.options.getString('id', true);
       const giveaway = getGiveawayById(id);
       if (!giveaway) {
-        await interaction.reply({ content: 'No existe un sorteo con ese ID.', ephemeral: true });
+        await interaction.reply({ content: 'No existe un sorteo con ese ID.', flags: 64 });
         return;
       }
       if (!giveaway.ended) {
-        await interaction.reply({ content: 'Solo puedes hacer reroll de sorteos finalizados.', ephemeral: true });
+        await interaction.reply({ content: 'Solo puedes hacer reroll de sorteos finalizados.', flags: 64 });
+        return;
+      }
+      if (!giveaway.participants.length) {
+        await interaction.reply({ content: 'Ese sorteo no tiene participantes para rehacer.', flags: 64 });
         return;
       }
 
       const result = await rerollGiveaway(client, id);
       await interaction.reply({
         content: result ? `🔁 Nuevos ganadores para \`${id}\`: ${result.winnersMentions}` : 'No se pudo rehacer el sorteo.',
-        ephemeral: true
+        flags: 64
       });
     }
   }

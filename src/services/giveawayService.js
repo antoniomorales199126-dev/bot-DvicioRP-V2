@@ -12,18 +12,42 @@ function ensureStorage() {
   if (!fs.existsSync(dataFile)) fs.writeFileSync(dataFile, JSON.stringify({ active: [], ended: [] }, null, 2));
 }
 
+function normalizeStore(store) {
+  return {
+    active: Array.isArray(store?.active) ? store.active : [],
+    ended: Array.isArray(store?.ended) ? store.ended : []
+  };
+}
+
 function readStore() {
   ensureStorage();
-  return JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+
+  try {
+    return normalizeStore(JSON.parse(fs.readFileSync(dataFile, 'utf8')));
+  } catch (error) {
+    console.error('❌ El archivo sorteos.json estaba dañado. Se ha restaurado automáticamente.', error);
+    const fallback = { active: [], ended: [] };
+    writeStore(fallback);
+    return fallback;
+  }
 }
 
 function writeStore(data) {
   ensureStorage();
-  fs.writeFileSync(dataFile, JSON.stringify(data, null, 2));
+  fs.writeFileSync(dataFile, JSON.stringify(normalizeStore(data), null, 2));
 }
 
 function generateGiveawayId() {
   return crypto.randomBytes(4).toString('hex');
+}
+
+function isValidImageUrl(value) {
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) && /\.(png|jpe?g|gif|webp)$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
 }
 
 function createGiveaway(data) {
@@ -48,6 +72,14 @@ function createGiveaway(data) {
   store.active.push(giveaway);
   writeStore(store);
   return giveaway;
+}
+
+function removeGiveaway(id) {
+  const store = readStore();
+  const initialLength = store.active.length;
+  store.active = store.active.filter(g => g.id !== id);
+  writeStore(store);
+  return store.active.length !== initialLength;
 }
 
 function setGiveawayMessageId(id, messageId) {
@@ -103,20 +135,31 @@ function buildParticipateRow(giveawayId, disabled = false) {
   );
 }
 
+async function fetchGiveawayMessage(client, giveaway) {
+  const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
+  if (!channel || typeof channel.messages?.fetch !== 'function') return { channel: null, message: null };
+
+  const message = giveaway.messageId
+    ? await channel.messages.fetch(giveaway.messageId).catch(() => null)
+    : null;
+
+  return { channel, message };
+}
+
 async function refreshGiveawayMessage(client, giveawayId) {
   const giveaway = getGiveawayById(giveawayId);
   if (!giveaway || giveaway.ended || !giveaway.messageId) return;
 
-  const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
-  if (!channel) return;
-  const message = await channel.messages.fetch(giveaway.messageId).catch(() => null);
+  const { message } = await fetchGiveawayMessage(client, giveaway);
   if (!message) return;
 
   await message.edit({
     content: process.env.MENTION_EVERYONE === 'true' ? '@everyone 📢 ¡Atención, nuevo sorteo iniciado!' : '📢 ¡Atención, nuevo sorteo iniciado!',
     embeds: [buildGiveawayActiveEmbed(giveaway, giveaway.participants.length)],
     components: [buildParticipateRow(giveawayId, false)]
-  }).catch(() => null);
+  }).catch(error => {
+    console.error('No se pudo refrescar el mensaje del sorteo:', error);
+  });
 }
 
 async function endGiveaway(client, giveawayId) {
@@ -134,24 +177,28 @@ async function endGiveaway(client, giveawayId) {
   store.ended.push(giveaway);
   writeStore(store);
 
-  const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
   const winnersMentions = winners.length ? winners.map(id => `<@${id}>`).join(', ') : 'Sin participantes suficientes';
-  if (!channel) return { giveaway, winners, winnersMentions };
+  const { channel, message } = await fetchGiveawayMessage(client, giveaway);
 
-  const message = giveaway.messageId ? await channel.messages.fetch(giveaway.messageId).catch(() => null) : null;
   if (message) {
     await message.edit({
       content: process.env.MENTION_EVERYONE === 'true' ? '@everyone 📢 ¡Atención, nuevo sorteo iniciado!' : '📢 ¡Atención, nuevo sorteo iniciado!',
-      embeds: [buildGiveawayEndedEmbed(giveaway, winnersMentions, `<@${giveaway.hostId}>`)],
+      embeds: [buildGiveawayEndedEmbed(giveaway, winnersMentions, `<@${giveaway.hostId}>`, giveaway.participants.length)],
       components: [buildParticipateRow(giveawayId, true)]
-    }).catch(() => null);
+    }).catch(error => {
+      console.error('No se pudo actualizar el mensaje final del sorteo:', error);
+    });
   }
 
-  await channel.send({
-    content: winners.length
-      ? `🎉 ¡Sorteo terminado! Enhorabuena ${winnersMentions}, habéis ganado **${giveaway.prize}**. Contactad con <@${giveaway.hostId}> para reclamar vuestro premio.`
-      : `⚠️ El sorteo **${giveaway.prize}** terminó sin participantes válidos.`
-  }).catch(() => null);
+  if (channel) {
+    await channel.send({
+      content: winners.length
+        ? `🎉 ¡Sorteo terminado! Enhorabuena ${winnersMentions}, habéis ganado **${giveaway.prize}**. Contactad con <@${giveaway.hostId}> para reclamar vuestro premio.`
+        : `⚠️ El sorteo **${giveaway.prize}** terminó sin participantes válidos.`
+    }).catch(error => {
+      console.error('No se pudo enviar el mensaje de cierre del sorteo:', error);
+    });
+  }
 
   return { giveaway, winners, winnersMentions };
 }
@@ -166,13 +213,26 @@ async function rerollGiveaway(client, giveawayId) {
   writeStore(store);
 
   const winnersMentions = winners.length ? winners.map(id => `<@${id}>`).join(', ') : 'Sin participantes suficientes';
-  const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
+  const { channel, message } = await fetchGiveawayMessage(client, giveaway);
+
+  if (message) {
+    await message.edit({
+      content: process.env.MENTION_EVERYONE === 'true' ? '@everyone 📢 ¡Atención, nuevo sorteo iniciado!' : '📢 ¡Atención, nuevo sorteo iniciado!',
+      embeds: [buildGiveawayEndedEmbed(giveaway, winnersMentions, `<@${giveaway.hostId}>`, giveaway.participants.length)],
+      components: [buildParticipateRow(giveawayId, true)]
+    }).catch(error => {
+      console.error('No se pudo actualizar el mensaje tras el reroll:', error);
+    });
+  }
+
   if (channel) {
     await channel.send({
       content: winners.length
         ? `🔁 Reroll del sorteo **${giveaway.prize}**: nuevos ganadores ${winnersMentions}.`
         : `⚠️ No hay participantes suficientes para rehacer el sorteo **${giveaway.prize}**.`
-    }).catch(() => null);
+    }).catch(error => {
+      console.error('No se pudo anunciar el reroll:', error);
+    });
   }
 
   return { giveaway, winners, winnersMentions };
@@ -180,6 +240,7 @@ async function rerollGiveaway(client, giveawayId) {
 
 module.exports = {
   createGiveaway,
+  removeGiveaway,
   setGiveawayMessageId,
   getGiveawayById,
   getActiveGiveaways,
@@ -188,5 +249,6 @@ module.exports = {
   buildParticipateRow,
   refreshGiveawayMessage,
   endGiveaway,
-  rerollGiveaway
+  rerollGiveaway,
+  isValidImageUrl
 };
